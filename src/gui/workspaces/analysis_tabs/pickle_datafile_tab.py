@@ -35,8 +35,9 @@ class PickleDataFileTab(BaseTab):
     # Signal emitted when pickle file is loaded/created
     pickle_loaded = pyqtSignal(str)  # Emits file path
     
-    # Column names for new pickle files
+    # Column names for new pickle files (in order)
     COL_FILENAME = "Filename"
+    COL_DIRECTORY = "Directory"
     COL_GROUP = "Group"
     COL_GROUP_ID = "Group_ID"
     
@@ -284,6 +285,18 @@ class PickleDataFileTab(BaseTab):
         # Fallback: current working directory
         return os.getcwd()
     
+    def _get_image_directory_from_input(self) -> str | None:
+        """Get the image directory from the Input workspace."""
+        if self._get_input_data_callback:
+            try:
+                input_data = self._get_input_data_callback()
+                selected_files = input_data.get('selected_files', [])
+                if selected_files:
+                    return os.path.dirname(selected_files[0])
+            except Exception:
+                pass
+        return None
+    
     def _on_start_new(self):
         """Handle Start New button click."""
         if not self._get_input_data_callback:
@@ -313,6 +326,9 @@ class PickleDataFileTab(BaseTab):
             )
             return
         
+        # Get the base directory from the first selected file
+        base_directory = os.path.dirname(selected_files[0])
+        
         # Create DataFrame
         data = []
         group_number_map = {}  # Map group names to continuous numbers
@@ -327,6 +343,7 @@ class PickleDataFileTab(BaseTab):
                         filename = os.path.basename(filepath)
                         data.append({
                             self.COL_FILENAME: filename,
+                            self.COL_DIRECTORY: base_directory,
                             self.COL_GROUP: "",
                             self.COL_GROUP_ID: 0
                         })
@@ -342,21 +359,24 @@ class PickleDataFileTab(BaseTab):
                         filename = os.path.basename(filepath)
                         data.append({
                             self.COL_FILENAME: filename,
+                            self.COL_DIRECTORY: base_directory,
                             self.COL_GROUP: group_name,
                             self.COL_GROUP_ID: group_num
                         })
         else:
-            # No grouping - just filenames
+            # No grouping - just filenames with directory
             for filepath in selected_files:
                 filename = os.path.basename(filepath)
                 data.append({
                     self.COL_FILENAME: filename,
+                    self.COL_DIRECTORY: base_directory,
                     self.COL_GROUP: "",
                     self.COL_GROUP_ID: 0
                 })
         
-        # Create DataFrame
-        self._dataframe = pd.DataFrame(data)
+        # Create DataFrame with explicit column order
+        column_order = [self.COL_FILENAME, self.COL_DIRECTORY, self.COL_GROUP, self.COL_GROUP_ID]
+        self._dataframe = pd.DataFrame(data, columns=column_order)
         
         # Apply sorting if checkbox is checked
         if self.sort_by_groups_checkbox.isChecked():
@@ -383,6 +403,7 @@ class PickleDataFileTab(BaseTab):
                 self._has_unsaved_changes = False
                 self._update_display()
                 self.directory_display.setText(filepath)
+                self.save_button.setEnabled(False)
                 self.pickle_loaded.emit(filepath)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save pickle file: {e}")
@@ -412,6 +433,33 @@ class PickleDataFileTab(BaseTab):
                     )
                     return
                 
+                # Check if Directory column exists
+                if self.COL_DIRECTORY not in df.columns:
+                    # Prompt user to select directory
+                    directory = self._prompt_for_directory(filepath)
+                    if directory is None:
+                        # User cancelled
+                        return
+                    
+                    # Add Directory column right after Filename
+                    df.insert(1, self.COL_DIRECTORY, directory)
+                    
+                    # Save the updated pickle file automatically (required field)
+                    try:
+                        df.to_pickle(filepath)
+                        QMessageBox.information(
+                            self,
+                            "Directory Added",
+                            f"The Directory column has been added and saved to the pickle file."
+                        )
+                    except Exception as e:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            f"Failed to save updated pickle file: {e}"
+                        )
+                        return
+                
                 self._dataframe = df
                 self._current_pickle_path = filepath
                 self._has_unsaved_changes = False
@@ -422,6 +470,42 @@ class PickleDataFileTab(BaseTab):
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load pickle file: {e}")
+    
+    def _prompt_for_directory(self, pickle_filepath: str) -> str | None:
+        """
+        Prompt the user to select a directory for image files.
+        
+        Args:
+            pickle_filepath: Path to the pickle file being loaded.
+            
+        Returns:
+            Selected directory path, or None if cancelled.
+        """
+        # Show info message first
+        QMessageBox.information(
+            self,
+            "Directory Required",
+            "The loaded pickle file does not contain a Directory column.\n\n"
+            "Please select the directory where the image files are located."
+        )
+        
+        # Determine default directory for the dialog
+        # First try Input workspace directory, then pickle file directory
+        default_dir = self._get_image_directory_from_input()
+        if not default_dir:
+            default_dir = os.path.dirname(pickle_filepath)
+        
+        # Open directory selection dialog
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Image Files Directory",
+            default_dir,
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if directory:
+            return directory
+        return None
     
     def _on_sort_toggled(self, checked: bool):
         """Handle sort by groups checkbox toggle."""
@@ -529,4 +613,3 @@ class PickleDataFileTab(BaseTab):
             "has_unsaved_changes": self._has_unsaved_changes,
             "row_count": len(self._dataframe) if self._dataframe is not None else 0,
         }
-
