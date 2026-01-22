@@ -1,0 +1,56 @@
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Cursor
+.cursor/
+
+# Qt specific
+*.qmlc
+*.jsc
+moc_*.cpp
+ui_*.py
+qrc_*.py
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+*.log
+*.tmp
+.env
+.env.local
+app_settings.json
+
+# Test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter (if used later)
+.ipynb_checkpoints/
+
