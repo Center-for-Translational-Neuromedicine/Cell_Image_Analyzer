@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QLineEdit, QPushButton, QCheckBox, QGroupBox, QSplitter,
     QScrollArea, QButtonGroup, QFileDialog, QMessageBox,
-    QListWidget, QListWidgetItem, QSizePolicy
+    QListWidget, QListWidgetItem, QSizePolicy, QDialog,
+    QComboBox, QProgressDialog, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -307,7 +308,7 @@ class OutputWorkspace(BaseWorkspace):
         
         layout.addLayout(second_row)
         
-        # Third row: Sub-toggles for Intensity Distributions (Log-scale and Norm)
+        # Third row: Sub-toggles for Intensity Distributions (Log-scale and Norm) + Export button
         third_row = QHBoxLayout()
         third_row.setSpacing(15)
         
@@ -328,6 +329,30 @@ class OutputWorkspace(BaseWorkspace):
         third_row.addWidget(self.norm_toggle)
         
         third_row.addStretch()
+        
+        # Export button (lower right corner)
+        self.export_button = QPushButton("Export As...")
+        self.export_button.setFixedWidth(100)
+        self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_button.setStyleSheet(f"""
+            QPushButton {{
+                padding: 6px 12px;
+                background-color: {Colors.ACCENT};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.PRIMARY};
+            }}
+        """)
+        self.export_button.clicked.connect(self._on_export)
+        third_row.addWidget(self.export_button)
         
         layout.addLayout(third_row)
         
@@ -940,8 +965,382 @@ class OutputWorkspace(BaseWorkspace):
         except Exception:
             return None
     
+    # ==================== Export Methods ====================
+    
+    def _on_export(self):
+        """Handle Export As... button click."""
+        # Check if there are sheets to export
+        selected_groups = [name for name, toggle in self._group_toggles.items() if toggle.isChecked()]
+        
+        if not selected_groups:
+            QMessageBox.warning(
+                self,
+                "No Sheets to Export",
+                "Please select at least one group to generate sheets for export."
+            )
+            return
+        
+        # Get default folder name from pickle filename
+        default_folder_name = "export"
+        if self._current_pickle_path:
+            pickle_basename = os.path.basename(self._current_pickle_path)
+            default_folder_name = os.path.splitext(pickle_basename)[0]
+        
+        # Get default destination (same directory as pickle file or current directory)
+        default_destination = os.getcwd()
+        if self._current_pickle_path:
+            default_destination = os.path.dirname(self._current_pickle_path)
+        
+        # Open export dialog
+        dialog = ExportDialog(default_destination, default_folder_name, self)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            destination = dialog.get_destination()
+            folder_name = dialog.get_folder_name()
+            export_format = dialog.get_format()
+            
+            # Create full export path
+            export_path = os.path.join(destination, folder_name)
+            
+            # Check if folder exists
+            if os.path.exists(export_path):
+                reply = QMessageBox.warning(
+                    self,
+                    "Folder Exists",
+                    f"The folder '{folder_name}' already exists at the destination.\n\n"
+                    "Do you want to overwrite the existing files?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel
+                )
+                
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+            else:
+                # Create the folder
+                try:
+                    os.makedirs(export_path)
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Failed to create export folder:\n{e}"
+                    )
+                    return
+            
+            # Export the sheets
+            self._export_sheets(export_path, export_format, selected_groups)
+    
+    def _export_sheets(self, export_path: str, export_format: str, selected_groups: list[str]):
+        """
+        Export sheets to the specified folder.
+        
+        Args:
+            export_path: Path to the export folder.
+            export_format: Export format ('png' or 'svg').
+            selected_groups: List of group names to export.
+        """
+        if self._dataframe is None:
+            return
+        
+        total_sheets = len(selected_groups)
+        
+        # Create progress dialog
+        progress = QProgressDialog("Exporting sheets...", "Cancel", 0, total_sheets, self)
+        progress.setWindowTitle("Exporting")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        
+        exported_count = 0
+        failed_sheets = []
+        
+        for idx, group_name in enumerate(selected_groups):
+            if progress.wasCanceled():
+                QMessageBox.information(self, "Cancelled", "Export was cancelled.")
+                return
+            
+            progress.setLabelText(f"Exporting: {group_name}")
+            progress.setValue(idx)
+            
+            # Get group data
+            group_df = self._dataframe[self._dataframe["Group"] == group_name]
+            if group_df.empty:
+                failed_sheets.append(group_name)
+                continue
+            
+            group_id = int(group_df.iloc[0]["Group_ID"])
+            
+            # Create figure for export (higher DPI for quality)
+            # A4 landscape proportions
+            fig_width = 11.69  # inches (A4 width)
+            fig_height = 8.27  # inches (A4 height)
+            
+            fig = Figure(figsize=(fig_width, fig_height), dpi=300)
+            fig.set_facecolor('white')
+            
+            # Render the sheet content
+            try:
+                self._render_sheet_content(fig, group_name, group_id, group_df)
+                
+                # Create filename
+                # Sanitize group name for filename (remove invalid characters)
+                safe_group_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in group_name)
+                filename = f"{safe_group_name}_{group_id}.{export_format}"
+                filepath = os.path.join(export_path, filename)
+                
+                # Save figure
+                fig.savefig(filepath, format=export_format, dpi=300, 
+                           bbox_inches='tight', facecolor='white', edgecolor='none')
+                
+                exported_count += 1
+                
+            except Exception as e:
+                failed_sheets.append(f"{group_name} ({e})")
+            
+            finally:
+                plt.close(fig)
+        
+        progress.setValue(total_sheets)
+        progress.close()
+        
+        # Show completion message
+        if failed_sheets:
+            failed_list = "\n".join(failed_sheets[:10])
+            if len(failed_sheets) > 10:
+                failed_list += f"\n... and {len(failed_sheets) - 10} more"
+            
+            QMessageBox.warning(
+                self,
+                "Export Complete with Warnings",
+                f"Export complete.\n\n"
+                f"Successfully exported: {exported_count} sheets\n"
+                f"Failed: {len(failed_sheets)} sheets\n\n"
+                f"Failed sheets:\n{failed_list}\n\n"
+                f"Saved to: {export_path}"
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Successfully exported {exported_count} sheets as {export_format.upper()}.\n\n"
+                f"Saved to: {export_path}"
+            )
+    
     # ==================== Lifecycle Methods ====================
     
     def on_activated(self):
         """Called when Output workspace becomes active."""
         self.refresh_data()
+
+
+class ExportDialog(QDialog):
+    """
+    Dialog for configuring sheet export settings.
+    
+    Allows user to select:
+    - Destination directory
+    - Folder name
+    - Export format (PNG or SVG)
+    """
+    
+    def __init__(self, default_destination: str, default_folder_name: str, parent=None):
+        super().__init__(parent)
+        
+        self._destination = default_destination
+        self._folder_name = default_folder_name
+        
+        self.setWindowTitle("Export Sheets")
+        self.setMinimumWidth(500)
+        self.setModal(True)
+        
+        self._init_ui()
+    
+    def _init_ui(self):
+        """Initialize the dialog UI."""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Destination section
+        dest_label = QLabel("Destination:")
+        dest_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {Colors.TEXT};")
+        layout.addWidget(dest_label)
+        
+        dest_row = QHBoxLayout()
+        
+        self.destination_edit = QLineEdit(self._destination)
+        self.destination_edit.setReadOnly(True)
+        self.destination_edit.setStyleSheet(f"""
+            QLineEdit {{
+                padding: 6px 10px;
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                background-color: #F8F8F8;
+                font-size: 11px;
+            }}
+        """)
+        dest_row.addWidget(self.destination_edit, 1)
+        
+        browse_button = QPushButton("Browse...")
+        browse_button.setFixedWidth(80)
+        browse_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse_button.setStyleSheet(f"""
+            QPushButton {{
+                padding: 6px 12px;
+                background-color: {Colors.SECONDARY};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER};
+            }}
+        """)
+        browse_button.clicked.connect(self._on_browse)
+        dest_row.addWidget(browse_button)
+        
+        layout.addLayout(dest_row)
+        
+        # Folder name section
+        folder_label = QLabel("Folder Name:")
+        folder_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {Colors.TEXT};")
+        layout.addWidget(folder_label)
+        
+        self.folder_edit = QLineEdit(self._folder_name)
+        self.folder_edit.setStyleSheet(f"""
+            QLineEdit {{
+                padding: 6px 10px;
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                background-color: #FFFFFF;
+                font-size: 11px;
+            }}
+        """)
+        layout.addWidget(self.folder_edit)
+        
+        # Format section
+        format_row = QHBoxLayout()
+        
+        format_label = QLabel("Format:")
+        format_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {Colors.TEXT};")
+        format_row.addWidget(format_label)
+        
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["PNG (.png)", "SVG (.svg)"])
+        self.format_combo.setFixedWidth(150)
+        self.format_combo.setStyleSheet(f"""
+            QComboBox {{
+                padding: 6px 10px;
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                background-color: #FFFFFF;
+                font-size: 11px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 20px;
+            }}
+        """)
+        format_row.addWidget(self.format_combo)
+        
+        format_row.addStretch()
+        
+        layout.addLayout(format_row)
+        
+        # Add spacing before buttons
+        layout.addSpacing(10)
+        
+        # Button box
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        
+        # Style the buttons
+        ok_button = button_box.button(QDialogButtonBox.StandardButton.Ok)
+        ok_button.setText("Export")
+        ok_button.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 20px;
+                background-color: {Colors.ACTIVE};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #16A085;
+            }}
+        """)
+        
+        cancel_button = button_box.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel_button.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 20px;
+                background-color: {Colors.SECONDARY};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER};
+            }}
+        """)
+        
+        layout.addWidget(button_box)
+    
+    def _on_browse(self):
+        """Handle Browse button click."""
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Destination Directory",
+            self._destination,
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if directory:
+            self._destination = directory
+            self.destination_edit.setText(directory)
+    
+    def _on_accept(self):
+        """Validate and accept the dialog."""
+        folder_name = self.folder_edit.text().strip()
+        
+        if not folder_name:
+            QMessageBox.warning(
+                self,
+                "Invalid Folder Name",
+                "Please enter a folder name."
+            )
+            return
+        
+        # Check for invalid characters in folder name
+        invalid_chars = '<>:"/\\|?*'
+        if any(c in folder_name for c in invalid_chars):
+            QMessageBox.warning(
+                self,
+                "Invalid Folder Name",
+                f"Folder name cannot contain these characters: {invalid_chars}"
+            )
+            return
+        
+        self.accept()
+    
+    def get_destination(self) -> str:
+        """Get the selected destination directory."""
+        return self._destination
+    
+    def get_folder_name(self) -> str:
+        """Get the entered folder name."""
+        return self.folder_edit.text().strip()
+    
+    def get_format(self) -> str:
+        """Get the selected export format."""
+        format_text = self.format_combo.currentText()
+        if "PNG" in format_text:
+            return "png"
+        else:
+            return "svg"
