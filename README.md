@@ -129,6 +129,8 @@ The Analysis workspace handles data management and image processing.
   - Shows progress dialog during processing
   - Handles existing columns (Cancel/Overwrite/Save As options)
 
+<img width="1280" height="832" alt="image" src="https://github.com/user-attachments/assets/dd1427ed-4e67-49b3-b40a-969ee3f1097f" />
+
 ---
 
 ### 3. Output Workspace
@@ -184,6 +186,8 @@ The Output workspace generates visual reports and exports.
   - Creates folder at destination
   - One file per sheet: `{GroupName}_{GroupID}.{format}`
   - Progress dialog during export
+
+<img width="1596" height="894" alt="image" src="https://github.com/user-attachments/assets/bf39657a-1da5-40fe-a4cb-a7d6323ec3a2" />
 
 ---
 
