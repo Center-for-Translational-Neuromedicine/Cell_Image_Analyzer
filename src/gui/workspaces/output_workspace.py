@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QSizePolicy, QDialog,
     QComboBox, QProgressDialog, QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtWidgets import QApplication
 
 # Matplotlib imports for embedding in PyQt6
 import matplotlib
@@ -61,6 +62,13 @@ class OutputWorkspace(BaseWorkspace):
         self._group_toggles: dict[str, QCheckBox] = {}
         self._current_sheet_index: int = 0
         self._sheets_data: list[dict] = []
+        self._preview_cancelled: bool = False
+        
+        # Debounce timer for group toggle changes
+        self._group_toggle_debounce_timer = QTimer()
+        self._group_toggle_debounce_timer.setSingleShot(True)
+        self._group_toggle_debounce_timer.setInterval(400)  # 400ms delay
+        self._group_toggle_debounce_timer.timeout.connect(self._on_debounced_group_toggle)
         
         # Color palette for files within groups (tab10 colormap)
         self._file_colors = plt.cm.tab10.colors
@@ -519,12 +527,18 @@ class OutputWorkspace(BaseWorkspace):
             self._show_singles_placeholder()
     
     def _on_group_toggle_changed(self):
-        """Handle group toggle state change."""
+        """Handle group toggle state change - start debounce timer."""
+        # Restart the debounce timer to wait for user to finish toggling
+        self._group_toggle_debounce_timer.start()
+    
+    def _on_debounced_group_toggle(self):
+        """Handle debounced group toggle - update preview after delay."""
         self._update_preview()
     
     def _on_display_option_changed(self):
         """Handle display option toggle change (Log-scale, Norm)."""
-        self._update_preview()
+        # Also debounce display option changes
+        self._group_toggle_debounce_timer.start()
     
     def _show_singles_placeholder(self):
         """Show placeholder when Singles mode is selected."""
@@ -647,6 +661,7 @@ class OutputWorkspace(BaseWorkspace):
     def _update_preview(self):
         """Update the preview pane with sheets for selected groups."""
         self._clear_preview()
+        self._preview_cancelled = False
         
         if self._dataframe is None or self._dataframe.empty:
             self.preview_placeholder.setText("No data available.\n\nLoad a pickle file to see preview.")
@@ -677,8 +692,41 @@ class OutputWorkspace(BaseWorkspace):
         
         self.preview_placeholder.hide()
         
+        total_groups = len(selected_groups)
+        
+        # Show progress dialog for multiple groups or groups with many files
+        show_progress = total_groups > 1 or any(
+            len(self._dataframe[self._dataframe["Group"] == g]) > 3 
+            for g in selected_groups
+        )
+        
+        progress = None
+        if show_progress:
+            progress = QProgressDialog("Generating preview sheets...", "Cancel", 0, total_groups, self)
+            progress.setWindowTitle("Generating Preview")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)  # Show immediately
+            progress.setValue(0)
+            progress.setMinimumWidth(350)
+            # Process events to show dialog immediately
+            QApplication.processEvents()
+        
         # Create a sheet for each selected group
-        for group_name in selected_groups:
+        for idx, group_name in enumerate(selected_groups):
+            # Check for cancellation
+            if progress and progress.wasCanceled():
+                self._preview_cancelled = True
+                self._clear_preview()
+                self.preview_placeholder.setText("Preview generation cancelled.\n\nSelect groups to preview.")
+                self.preview_placeholder.show()
+                break
+            
+            # Update progress
+            if progress:
+                progress.setLabelText(f"Generating sheet {idx + 1}/{total_groups}: {group_name}")
+                progress.setValue(idx)
+                QApplication.processEvents()
+            
             group_df = self._dataframe[self._dataframe["Group"] == group_name]
             if group_df.empty:
                 continue
@@ -688,6 +736,14 @@ class OutputWorkspace(BaseWorkspace):
             # Create sheet widget
             sheet = self._create_sheet(group_name, group_id, group_df)
             self.sheets_layout.addWidget(sheet)
+            
+            # Process events to keep UI responsive and update progress
+            QApplication.processEvents()
+        
+        # Close progress dialog
+        if progress:
+            progress.setValue(total_groups)
+            progress.close()
     
     def _create_sheet(self, group_name: str, group_id: int, group_df: pd.DataFrame) -> QWidget:
         """
